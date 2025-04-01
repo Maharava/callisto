@@ -71,7 +71,7 @@ class CallistoAPI(CallistoAPIInterface):
                 session.flush()
             
             # Create user
-            user = User.create(name=name)
+            user = User.create(name=name, metadata=metadata)
             session.add(user)
             session.flush()
             
@@ -404,6 +404,79 @@ class CallistoAPI(CallistoAPIInterface):
                 for job in jobs:
                     job.status = "completed"
                     job.completed_at = int(datetime.now().timestamp())
+                    
+    """Adding missing methods to CallistoAPI."""
+
+    # Add these methods to the CallistoAPI class
+
+    def start_conversation(self, user_id: str, platform_name: str) -> str:
+        """Start a new conversation and return the conversation ID."""
+        if not validate_uuid(user_id):
+            raise ValueError("Invalid user ID format")
+            
+        platform_name = sanitize_input(platform_name)
+        
+        with db.session() as session:
+            # Find platform
+            platform = session.query(Platform).filter_by(platform_name=platform_name).first()
+            if not platform:
+                platform = Platform(platform_name=platform_name)
+                session.add(platform)
+                session.flush()
+            
+            # Create conversation
+            conv = Conversation.create(user_id, platform.platform_id)
+            session.add(conv)
+            session.flush()
+            
+            return conv.conversation_id
+
+    def add_message(self, conversation_id: str, content: str, is_from_user: bool) -> None:
+        """Add a message to a conversation."""
+        # Validate inputs
+        MessageAddModel(
+            conversation_id=conversation_id,
+            content=content,
+            is_from_user=is_from_user
+        )
+        
+        if not validate_uuid(conversation_id):
+            raise ValueError("Invalid conversation ID format")
+            
+        content = sanitize_input(content)
+        
+        with db.session() as session:
+            # Check if conversation exists
+            conv = session.query(Conversation).filter_by(conversation_id=conversation_id).first()
+            if not conv:
+                raise ValueError("Conversation not found")
+            
+            # Add message
+            now = int(datetime.now().timestamp())
+            message = Message(
+                conversation_id=conversation_id,
+                is_from_user=is_from_user,
+                content=content,
+                timestamp=now
+            )
+            session.add(message)
+            
+            # Update user last seen
+            user = session.query(User).filter_by(user_id=conv.user_id).first()
+            if user:
+                user.last_seen = now
+
+    def end_conversation(self, conversation_id: str) -> None:
+        """End a conversation."""
+        if not validate_uuid(conversation_id):
+            raise ValueError("Invalid conversation ID format")
+            
+        with db.session() as session:
+            # Find conversation
+            conv = session.query(Conversation).filter_by(conversation_id=conversation_id).first()
+            if conv and not conv.ended_at:
+                now = int(datetime.now().timestamp())
+                conv.ended_at = now
 
 # Create global API instance for easy import
 api = CallistoAPI()

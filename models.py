@@ -15,7 +15,7 @@ class User(Base):
     name = Column(Text, nullable=False)
     created_at = Column(Integer, nullable=False)
     last_seen = Column(Integer, nullable=False)
-    metadata = Column(Text)  # JSON for extensibility
+    user_metadata = Column(Text)  # Changed from 'metadata' to 'user_metadata'
     
     platforms = relationship("UserPlatform", back_populates="user", cascade="all, delete-orphan")
     knowledge = relationship("UserKnowledge", back_populates="user", cascade="all, delete-orphan")
@@ -30,7 +30,7 @@ class User(Base):
             name=name,
             created_at=now,
             last_seen=now,
-            metadata=metadata
+            user_metadata=metadata  # Use user_metadata here
         )
 
 
