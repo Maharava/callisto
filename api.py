@@ -168,7 +168,7 @@ class CallistoAPI(CallistoAPIInterface):
     # KNOWLEDGE MANAGEMENT
     
     def get_user_knowledge(self, user_id: str, category_name: Optional[str] = None, 
-                          include_personal: bool = True) -> Dict[str, Any]:
+                          include_personal: bool = True, since_timestamp: Optional[int] = None) -> Dict[str, Any]:
         """Get all knowledge for a user, with optional filtering."""
         if not validate_uuid(user_id):
             raise ValueError("Invalid user ID format")
@@ -178,7 +178,22 @@ class CallistoAPI(CallistoAPIInterface):
             
         # Use knowledge manager for retrieval
         is_personal = None if include_personal else False
-        return KnowledgeManager.get_knowledge(user_id, category_name, is_personal)
+        knowledge = KnowledgeManager.get_knowledge(user_id, category_name, is_personal)
+        
+        # Filter by timestamp if provided
+        if since_timestamp is not None:
+            knowledge = {k: v for k, v in knowledge.items() 
+                        if v.get("updated_at", 0) >= since_timestamp}
+            
+        return knowledge
+    
+    def get_knowledge_by_source(self, user_id: str, source: str) -> Dict[str, Any]:
+        """Get all knowledge from a specific source."""
+        if not validate_uuid(user_id):
+            raise ValueError("Invalid user ID format")
+            
+        source = sanitize_input(source)
+        return KnowledgeManager.get_knowledge_by_source(user_id, source)
     
     def store_knowledge(self, user_id: str, category_name: str, value: Any, 
                        confidence: float = 1.0, source: str = "user_stated") -> None:
@@ -310,6 +325,29 @@ class CallistoAPI(CallistoAPIInterface):
                 
             return conv.conversation_id
     
+    def batch_store_conversations(self, user_id: str, platform_name: str, 
+                                conversations: List[Dict[str, Any]]) -> List[str]:
+        """Store multiple conversations in batch."""
+        if not validate_uuid(user_id):
+            raise ValueError("Invalid user ID format")
+            
+        platform_name = sanitize_input(platform_name)
+        conversation_ids = []
+        
+        for conv_data in conversations:
+            messages = conv_data.get("messages", [])
+            conversation_id = conv_data.get("conversation_id")
+            
+            conv_id = self.store_conversation(
+                user_id=user_id,
+                platform_name=platform_name,
+                messages=messages,
+                conversation_id=conversation_id
+            )
+            conversation_ids.append(conv_id)
+            
+        return conversation_ids
+    
     def get_conversation_history(self, conversation_id: str) -> List[Dict[str, Any]]:
         """Get all messages in a conversation."""
         if not validate_uuid(conversation_id):
@@ -318,8 +356,9 @@ class CallistoAPI(CallistoAPIInterface):
         return ConversationManager.get_conversation_history(conversation_id)
     
     def get_recent_conversations(self, user_id: str, limit: int = 10, 
-                               include_processed: bool = True) -> List[Dict[str, Any]]:
-        """Get recent conversations for a user."""
+                              include_processed: bool = True,
+                              since_timestamp: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Get recent conversations for a user with optional filtering."""
         if not validate_uuid(user_id):
             raise ValueError("Invalid user ID format")
             
@@ -328,6 +367,9 @@ class CallistoAPI(CallistoAPIInterface):
             
             if not include_processed:
                 query = query.filter_by(extracted=False)
+                
+            if since_timestamp is not None:
+                query = query.filter(Conversation.started_at >= since_timestamp)
                 
             conversations = (query.order_by(Conversation.started_at.desc())
                            .limit(limit)
