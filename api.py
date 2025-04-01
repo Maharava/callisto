@@ -1,7 +1,7 @@
 """Core API for interacting with the Callisto memory database."""
 from datetime import datetime
 import json
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 
 from .db import db
 from .models import (
@@ -15,13 +15,17 @@ from .validation import (
     CategoryCreateModel, MessageAddModel
 )
 from .security import sanitize_input, validate_uuid, secure_delete
+from .knowledge import KnowledgeManager
+from .categories import CategoryManager
+from .conversations import ConversationManager
 
 class CallistoAPI(CallistoAPIInterface):
     """Main API for Jupiter to interact with Callisto memory system."""
     
+    # USER MANAGEMENT
+    
     def get_user(self, platform_name: str, platform_username: str) -> Optional[User]:
         """Find a user by platform and username."""
-        # Sanitize inputs
         platform_name = sanitize_input(platform_name)
         platform_username = sanitize_input(platform_username)
         
@@ -161,52 +165,20 @@ class CallistoAPI(CallistoAPIInterface):
                 )
                 session.add(user_platform)
     
-    def get_user_knowledge(self, user_id: str) -> Dict[str, Any]:
-        """Get all knowledge for a user, categorised."""
+    # KNOWLEDGE MANAGEMENT
+    
+    def get_user_knowledge(self, user_id: str, category_name: Optional[str] = None, 
+                          include_personal: bool = True) -> Dict[str, Any]:
+        """Get all knowledge for a user, with optional filtering."""
         if not validate_uuid(user_id):
             raise ValueError("Invalid user ID format")
+        
+        if category_name:
+            category_name = sanitize_input(category_name)
             
-        with db.session() as session:
-            knowledge_items = (session.query(UserKnowledge, KnowledgeCategory)
-                .join(KnowledgeCategory)
-                .filter(UserKnowledge.user_id == user_id)
-                .all())
-            
-            result = {}
-            for knowledge, category in knowledge_items:
-                # Convert value based on data type
-                if category.data_type == "list":
-                    try:
-                        value = json.loads(knowledge.value)
-                    except:
-                        value = knowledge.value
-                elif category.data_type == "number":
-                    try:
-                        value = float(knowledge.value)
-                    except:
-                        value = knowledge.value
-                elif category.data_type == "boolean":
-                    value = knowledge.value.lower() in ('true', 'yes', '1')
-                else:
-                    value = knowledge.value
-                    
-                if category.category_name not in result:
-                    result[category.category_name] = {
-                        "value": value,
-                        "confidence": knowledge.confidence,
-                        "source": knowledge.source,
-                        "is_personal": category.is_personal
-                    }
-                elif knowledge.confidence > result[category.category_name]["confidence"]:
-                    # Keep the highest confidence value
-                    result[category.category_name] = {
-                        "value": value,
-                        "confidence": knowledge.confidence,
-                        "source": knowledge.source,
-                        "is_personal": category.is_personal
-                    }
-            
-            return result
+        # Use knowledge manager for retrieval
+        is_personal = None if include_personal else False
+        return KnowledgeManager.get_knowledge(user_id, category_name, is_personal)
     
     def store_knowledge(self, user_id: str, category_name: str, value: Any, 
                        confidence: float = 1.0, source: str = "user_stated") -> None:
@@ -220,67 +192,19 @@ class CallistoAPI(CallistoAPIInterface):
             source=source
         )
         
-        # Sanitize inputs
-        category_name = sanitize_input(category_name)
-        
-        # Sanitize value if it's a string or list
-        if isinstance(value, str):
-            value = sanitize_input(value)
-        elif isinstance(value, list):
-            value = [sanitize_input(item) if isinstance(item, str) else item for item in value]
+        if not validate_uuid(user_id):
+            raise ValueError("Invalid user ID format")
             
-        with db.session() as session:
-            # Find category
-            category = session.query(KnowledgeCategory).filter_by(category_name=category_name).first()
-            if not category:
-                # Determine data type
-                if isinstance(value, list):
-                    data_type = "list"
-                elif isinstance(value, bool):
-                    data_type = "boolean"
-                elif isinstance(value, (int, float)):
-                    data_type = "number"
-                else:
-                    data_type = "string"
-                    
-                # Create new category if it doesn't exist
-                category = KnowledgeCategory(
-                    category_name=category_name,
-                    data_type=data_type,
-                    is_personal=False
-                )
-                session.add(category)
-                session.flush()
+        # Use knowledge manager for storage
+        KnowledgeManager.store_knowledge(user_id, category_name, value, confidence, source)
+    
+    def batch_store_knowledge(self, user_id: str, knowledge_items: List[Dict[str, Any]]) -> None:
+        """Store multiple knowledge items at once."""
+        if not validate_uuid(user_id):
+            raise ValueError("Invalid user ID format")
             
-            # Convert value to string
-            if category.data_type == "list" and not isinstance(value, str):
-                value_str = json.dumps(value)
-            else:
-                value_str = str(value)
-            
-            now = int(datetime.now().timestamp())
-            
-            # Create or update knowledge
-            knowledge = (session.query(UserKnowledge)
-                .filter_by(user_id=user_id, category_id=category.category_id)
-                .first())
-                
-            if knowledge:
-                knowledge.value = value_str
-                knowledge.confidence = confidence
-                knowledge.source = source
-                knowledge.updated_at = now
-            else:
-                knowledge = UserKnowledge(
-                    user_id=user_id,
-                    category_id=category.category_id,
-                    value=value_str,
-                    confidence=confidence,
-                    source=source,
-                    created_at=now,
-                    updated_at=now
-                )
-                session.add(knowledge)
+        # Use knowledge manager for batch storage
+        KnowledgeManager.batch_store_knowledge(user_id, knowledge_items)
     
     def delete_knowledge(self, user_id: str, category_name: str) -> None:
         """Delete a piece of knowledge about a user."""
@@ -288,41 +212,23 @@ class CallistoAPI(CallistoAPIInterface):
             raise ValueError("Invalid user ID format")
             
         category_name = sanitize_input(category_name)
-        
-        with db.session() as session:
-            # Find category
-            category = session.query(KnowledgeCategory).filter_by(category_name=category_name).first()
-            if not category:
-                return
-            
-            # Find and delete knowledge
-            knowledge = (session.query(UserKnowledge)
-                .filter_by(user_id=user_id, category_id=category.category_id)
-                .first())
-                
-            if knowledge:
-                # Securely delete if personal
-                if category.is_personal:
-                    knowledge.value = secure_delete(knowledge.value)
-                    session.add(knowledge)
-                
-                session.delete(knowledge)
+        KnowledgeManager.delete_knowledge(user_id, category_name)
     
-    def get_knowledge_categories(self) -> List[Dict[str, Any]]:
+    def merge_knowledge(self, user_id: str, target_user_id: str) -> None:
+        """Merge knowledge from target user into this user."""
+        if not validate_uuid(user_id) or not validate_uuid(target_user_id):
+            raise ValueError("Invalid user ID format")
+            
+        KnowledgeManager.merge_knowledge(user_id, target_user_id)
+    
+    # CATEGORY MANAGEMENT
+    
+    def get_knowledge_categories(self, include_personal: bool = True) -> List[Dict[str, Any]]:
         """Get all knowledge categories."""
-        with db.session() as session:
-            categories = session.query(KnowledgeCategory).all()
-            return [
-                {
-                    "category_name": cat.category_name,
-                    "data_type": cat.data_type,
-                    "is_personal": cat.is_personal
-                }
-                for cat in categories
-            ]
+        return CategoryManager.get_categories(include_personal)
     
     def create_knowledge_category(self, category_name: str, data_type: str, 
-                                is_personal: bool = False) -> None:
+                                is_personal: bool = False) -> bool:
         """Create a new knowledge category."""
         # Validate inputs
         CategoryCreateModel(
@@ -331,27 +237,30 @@ class CallistoAPI(CallistoAPIInterface):
             is_personal=is_personal
         )
         
-        # Sanitize inputs
-        category_name = sanitize_input(category_name)
-        
-        with db.session() as session:
-            # Check if category already exists
-            existing = session.query(KnowledgeCategory).filter_by(category_name=category_name).first()
-            if not existing:
-                category = KnowledgeCategory(
-                    category_name=category_name,
-                    data_type=data_type,
-                    is_personal=is_personal
-                )
-                session.add(category)
+        return CategoryManager.create_category(category_name, data_type, is_personal)
     
-    def start_conversation(self, user_id: str, platform_name: str) -> str:
-        """Start a new conversation and return the conversation ID."""
+    def update_knowledge_category(self, category_name: str, data_type: Optional[str] = None,
+                                is_personal: Optional[bool] = None) -> bool:
+        """Update an existing knowledge category."""
+        category_name = sanitize_input(category_name)
+        return CategoryManager.update_category(category_name, data_type, is_personal)
+    
+    def delete_knowledge_category(self, category_name: str) -> bool:
+        """Delete a knowledge category."""
+        category_name = sanitize_input(category_name)
+        return CategoryManager.delete_category(category_name)
+    
+    # CONVERSATION MANAGEMENT
+    
+    def store_conversation(self, user_id: str, platform_name: str, messages: List[Dict[str, Any]], 
+                         conversation_id: Optional[str] = None) -> str:
+        """Store a complete conversation."""
         if not validate_uuid(user_id):
             raise ValueError("Invalid user ID format")
             
         platform_name = sanitize_input(platform_name)
         
+        # Create conversation
         with db.session() as session:
             # Find platform
             platform = session.query(Platform).filter_by(platform_name=platform_name).first()
@@ -360,83 +269,99 @@ class CallistoAPI(CallistoAPIInterface):
                 session.add(platform)
                 session.flush()
             
-            # Create conversation
-            conversation = Conversation.create(user_id, platform.platform_id)
-            session.add(conversation)
+            # Create conversation with provided ID or generate one
+            now = int(datetime.now().timestamp())
+            if conversation_id and validate_uuid(conversation_id):
+                # Check if conversation already exists
+                existing = session.query(Conversation).filter_by(conversation_id=conversation_id).first()
+                if existing:
+                    return existing.conversation_id
+                    
+                conv = Conversation(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    platform_id=platform.platform_id,
+                    started_at=now
+                )
+            else:
+                conv = Conversation.create(user_id, platform.platform_id)
+                
+            session.add(conv)
+            session.flush()
+            
+            # Add messages
+            for msg in messages:
+                content = sanitize_input(msg.get("content", ""))
+                is_from_user = msg.get("is_from_user", True)
+                timestamp = msg.get("timestamp", now)
+                
+                message = Message(
+                    conversation_id=conv.conversation_id,
+                    is_from_user=is_from_user,
+                    content=content,
+                    timestamp=timestamp
+                )
+                session.add(message)
             
             # Update user last seen
             user = session.query(User).filter_by(user_id=user_id).first()
             if user:
-                user.last_seen = conversation.started_at
-            
-            return conversation.conversation_id
-    
-    def add_message(self, conversation_id: str, content: str, is_from_user: bool) -> None:
-        """Add a message to a conversation."""
-        # Validate inputs
-        MessageAddModel(
-            conversation_id=conversation_id,
-            content=content,
-            is_from_user=is_from_user
-        )
-        
-        content = sanitize_input(content)
-        
-        with db.session() as session:
-            now = int(datetime.now().timestamp())
-            message = Message(
-                conversation_id=conversation_id,
-                is_from_user=is_from_user,
-                content=content,
-                timestamp=now
-            )
-            session.add(message)
-            
-            # Update user last seen
-            conversation = session.query(Conversation).filter_by(conversation_id=conversation_id).first()
-            if conversation:
-                user = session.query(User).filter_by(user_id=conversation.user_id).first()
-                if user:
-                    user.last_seen = now
-    
-    def end_conversation(self, conversation_id: str) -> None:
-        """End a conversation."""
-        if not validate_uuid(conversation_id):
-            raise ValueError("Invalid conversation ID format")
-            
-        with db.session() as session:
-            conversation = session.query(Conversation).filter_by(conversation_id=conversation_id).first()
-            if conversation and not conversation.ended_at:
-                conversation.ended_at = int(datetime.now().timestamp())
+                user.last_seen = now
                 
-                # Create extraction job
-                job = ExtractionJob(
-                    conversation_id=conversation_id,
-                    status="pending",
-                    created_at=conversation.ended_at
-                )
-                session.add(job)
+            return conv.conversation_id
     
     def get_conversation_history(self, conversation_id: str) -> List[Dict[str, Any]]:
         """Get all messages in a conversation."""
         if not validate_uuid(conversation_id):
             raise ValueError("Invalid conversation ID format")
             
+        return ConversationManager.get_conversation_history(conversation_id)
+    
+    def get_recent_conversations(self, user_id: str, limit: int = 10, 
+                               include_processed: bool = True) -> List[Dict[str, Any]]:
+        """Get recent conversations for a user."""
+        if not validate_uuid(user_id):
+            raise ValueError("Invalid user ID format")
+            
         with db.session() as session:
-            messages = (session.query(Message)
-                .filter_by(conversation_id=conversation_id)
-                .order_by(Message.timestamp)
-                .all())
+            query = session.query(Conversation).filter_by(user_id=user_id)
+            
+            if not include_processed:
+                query = query.filter_by(extracted=False)
+                
+            conversations = (query.order_by(Conversation.started_at.desc())
+                           .limit(limit)
+                           .all())
                 
             return [
                 {
-                    "message_id": message.message_id,
-                    "is_from_user": message.is_from_user,
-                    "content": message.content,
-                    "timestamp": message.timestamp
+                    "conversation_id": conv.conversation_id,
+                    "started_at": conv.started_at,
+                    "ended_at": conv.ended_at,
+                    "processed": conv.extracted
                 }
-                for message in messages
+                for conv in conversations
             ]
+    
+    def mark_conversation_processed(self, conversation_id: str) -> None:
+        """Mark a conversation as processed."""
+        if not validate_uuid(conversation_id):
+            raise ValueError("Invalid conversation ID format")
+            
+        with db.session() as session:
+            conv = session.query(Conversation).filter_by(conversation_id=conversation_id).first()
+            if conv:
+                conv.extracted = True
+                
+                # Mark any extraction jobs as completed
+                jobs = session.query(ExtractionJob).filter_by(
+                    conversation_id=conversation_id,
+                    status="pending"
+                ).all()
+                
+                for job in jobs:
+                    job.status = "completed"
+                    job.completed_at = int(datetime.now().timestamp())
 
 # Create global API instance for easy import
 api = CallistoAPI()

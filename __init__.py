@@ -7,13 +7,18 @@ from .models import (
 )
 from .api import api
 from .security import sanitize_input, validate_uuid, secure_delete
+from .knowledge import KnowledgeManager
+from .categories import CategoryManager
+from .conversations import ConversationManager
 
 __all__ = [
     'db', 'initialize', 'api',
     'User', 'Platform', 'UserPlatform',
     'KnowledgeCategory', 'UserKnowledge',
     'Conversation', 'Message', 'ExtractionJob',
-    'sanitize_input', 'validate_uuid', 'secure_delete'
+    'sanitize_input', 'validate_uuid', 'secure_delete',
+    'KnowledgeManager', 'CategoryManager',
+    'ConversationManager'
 ]
 
 def initialize(db_path=None):
@@ -28,5 +33,8 @@ def initialize(db_path=None):
     
     # Add default data
     db.init_default_data()
+    
+    # Add default categories
+    CategoryManager.create_default_categories()
     
     return db
