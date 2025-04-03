@@ -1,0 +1,214 @@
+# Callisto
+
+## Overview
+Callisto is a self-contained memory module for Jupiter AI, containing a database and associated API code for easy integration. Jupiter is made up of multiple modules to create an offline home AI companion. Callisto specifically handles storing user information and conversation history, providing a reliable persistence layer.
+
+## Core Components
+
+### User Information Management
+All users are assigned a Unique User ID (UUID) when first introduced to Jupiter. All of their data is attached to this UUID. Data stored is decided by Jupiter, and is broken into categories – for example: 'favourite_foods: pies, ice cream'.
+
+Key features:
+- **Category-based storage**: When Jupiter stores a piece of data, it sends a category and the data as a pair
+- **Automatic category management**: Callisto creates a new entry if the category doesn't exist, or appends the new data to the category if it exists
+- **Timestamp tracking**: Data tracks when it was stored, so newer data can overwrite older data
+- **Essential user attributes**: All UUIDs have 'preferred_name' and 'platform_username' categories to track both the user's preferred name and platform-specific usernames
+
+#### User Identity Merging
+Users may engage with Jupiter on multiple platforms and wish to link their accounts. The merge function will:
+- Add all data from the secondary UUID to the primary UUID
+- Handle data conflicts by preferring newer data or appending values in list-type categories
+- Delete the secondary UUID after successful merging
+
+### Conversation Storage
+Jupiter will supply complete conversation logs with timestamps, user identification, and message content.
+
+Requirements:
+- Store conversations in complete form
+- Track when the conversation was stored (timestamp)
+- Include a 'processed' flag (false or true)
+- Link UUIDs to the conversations they participate in
+
+This allows Jupiter to:
+- Retrieve past conversations by user
+- Retrieve unprocessed conversations for analysis
+- Mark conversations as processed after analysis
+
+## Database Schema
+
+### Core Tables
+
+```sql
+-- Users table
+CREATE TABLE users (
+    user_id UUID PRIMARY KEY,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- User attributes/data table
+CREATE TABLE user_data (
+    id SERIAL PRIMARY KEY,
+    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    category VARCHAR(50) NOT NULL,
+    value TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, category, value)
+);
+
+-- Platform identifiers
+CREATE TABLE platform_identifiers (
+    id SERIAL PRIMARY KEY,
+    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    platform VARCHAR(20) NOT NULL,  -- 'discord', 'gui', 'terminal', etc.
+    platform_id VARCHAR(100) NOT NULL,
+    username VARCHAR(100) NOT NULL,
+    UNIQUE(platform, platform_id)
+);
+
+-- Conversations table
+CREATE TABLE conversations (
+    conversation_id UUID PRIMARY KEY,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    title VARCHAR(255),
+    processed BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- Conversation participants junction table
+CREATE TABLE conversation_participants (
+    conversation_id UUID REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
+    PRIMARY KEY (conversation_id, user_id)
+);
+
+-- Messages table
+CREATE TABLE messages (
+    message_id UUID PRIMARY KEY,
+    conversation_id UUID REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+    sender_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    is_ai BOOLEAN NOT NULL,
+    content TEXT NOT NULL,
+    timestamp TIMESTAMP NOT NULL
+);
+```
+
+## API Interface
+
+### User Management
+
+```python
+def create_user(name: str, platform: str, platform_id: str) -> UUID:
+    """Create a new user and return their UUID"""
+
+def get_user_by_platform(platform: str, platform_id: str) -> Optional[dict]:
+    """Find a user by their platform-specific ID"""
+
+def get_user_data(user_id: UUID, category: Optional[str] = None) -> dict:
+    """Get all user data or data for a specific category"""
+
+def update_user_data(user_id: UUID, category: str, value: str, append: bool = False) -> bool:
+    """Update or append data for a user category"""
+
+def merge_users(primary_uuid: UUID, secondary_uuid: UUID) -> bool:
+    """Merge secondary user data into primary user account"""
+```
+
+### Conversation Management
+
+```python
+def store_conversation(conversation_data: dict, participants: List[UUID]) -> UUID:
+    """Store a complete conversation with its messages and participants"""
+
+def get_conversation(conversation_id: UUID) -> Optional[dict]:
+    """Retrieve a complete conversation by ID"""
+
+def get_user_conversations(user_id: UUID, limit: int = 10, processed: Optional[bool] = None) -> List[dict]:
+    """Get conversations involving a specific user"""
+
+def mark_conversation_processed(conversation_id: UUID) -> bool:
+    """Mark a conversation as processed"""
+```
+
+## Implementation Considerations
+
+### Platform Identifiers
+Platform identifiers create a mapping between platform-specific user IDs and Jupiter's internal UUIDs. For example:
+- Discord user with ID "195791341739966464"
+- GUI user with name "Reece"
+- Terminal user with name "Reece_Terminal"
+
+All may be the same person but interact through different interfaces. Platform identifiers allow Jupiter to:
+1. Recognize returning users on each platform
+2. Suggest account linking when the same name appears on multiple platforms
+3. Maintain platform-specific information
+
+### Error Handling and Retries
+Implement robust error handling:
+
+1. **Database connection issues**:
+   - Use connection pooling
+   - Implement exponential backoff for retries
+   - Fall back to in-memory cache temporarily if database is unreachable
+
+2. **Data integrity protection**:
+   - Use transactions for multi-step operations
+   - Implement data validation before storage
+   - Log all errors with appropriate context
+
+3. **Recovery mechanisms**:
+   - Implement background job queue for failed operations
+   - Periodically retry failed operations
+   - Include health check endpoint
+
+### Integration with Jupiter
+
+Callisto should be integrated with Jupiter as follows:
+
+1. **Startup/Shutdown**:
+   - Jupiter should initialize Callisto database connection during startup
+   - Properly close connections during shutdown
+   - Include database status in system health checks
+
+2. **API Client**:
+   ```python
+   class CallistoClient:
+       def __init__(self, db_connection_string):
+           self.engine = create_engine(db_connection_string)
+           self.Session = sessionmaker(bind=self.engine)
+           # Initialize database schema if not exists
+           Base.metadata.create_all(self.engine)
+           
+       async def get_user_data(self, user_id, category=None):
+           # Implementation
+           
+       async def store_conversation(self, conversation_data, participants):
+           # Implementation
+   ```
+
+3. **Replace existing managers**:
+   - Modify `UserDataManager` to use Callisto instead of JSON files
+   - Update `ConversationManager` to use Callisto for storage
+   - Add configuration toggle for backward compatibility
+
+## Development Roadmap
+
+1. **Phase 1: Core Implementation**
+   - Database schema setup
+   - Basic API implementation
+   - Integration with existing Jupiter systems
+
+2. **Phase 2: Reliability Enhancements**
+   - Comprehensive error handling
+   - Logging and monitoring
+   - Performance optimizations
+
+3. **Phase 3: Future Extensions** (if needed)
+   - Search capabilities
+   - Data analytics
+   - Backup and restore functionality
+
+## Notes
+- Callisto will run as part of Jupiter, not as a separate service
+- Authentication is not needed as it's an internal module
+- Starting with a clean slate, so data migration utilities are unnecessary
+- Search capabilities can be added in a future iteration if needed
